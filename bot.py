@@ -35,10 +35,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========== TOKENS & CONFIG (CONTAINED IN SCRIPT) ==========
-# WARNING: Hardcoding tokens is not recommended for production!
+# ========= ENVIRONMENT VARIABLES ==========
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+
+# Safety checks
+if not TELEGRAM_BOT_TOKEN:
+    raise Exception("❌ TELEGRAM_BOT_TOKEN is missing! Set it in Koyeb.")
+
+if not GITHUB_TOKEN:
+    raise Exception("❌ GITHUB_TOKEN is missing! Set it in Koyeb.")
 GITHUB_REPO_OWNER = "WolfT31"
 GITHUB_REPO_NAME = "SPORTVIP"
 GITHUB_FILE_PATH = "Users.json"
