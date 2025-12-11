@@ -11,9 +11,26 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 import logging
 import asyncio
 import threading
-import http.server
-import socketserver
+from flask import Flask
 
+# ========== FLASK SETUP ==========
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "✅ Telegram Bot is running on Koyeb"
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+def run_flask():
+    """Run Flask web server for health checks"""
+    port = int(os.getenv('PORT', 8080))
+    print(f"🌐 Starting Flask server on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
+# ========== YOUR BOT CODE ==========
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -32,7 +49,7 @@ DEFAULT_DATE = "2025-12-12"
 # Store user states for conversation flow
 user_states = {}
 
-# ========== YOUR ORIGINAL FUNCTIONS ==========
+# ========== KEEP ALL YOUR ORIGINAL FUNCTIONS ==========
 def generate_random_password(length=4):
     if length > 4:
         length = 4
@@ -106,7 +123,7 @@ def get_days_left(expire_str):
     except:
         return -999
 
-# ========== YOUR ORIGINAL HANDLERS ==========
+# ========== KEEP ALL YOUR ORIGINAL HANDLERS (NO CHANGES) ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send a welcome message when the command /start is issued."""
     welcome_text = """
@@ -625,33 +642,6 @@ async def setup_application():
     
     return application
 
-# ========== FIXED HEALTH CHECK SERVER FOR KOYEB ==========
-def run_health_check():
-    """Simple HTTP server for Koyeb health checks on port 8080"""
-    class HealthHandler(http.server.SimpleHTTPRequestHandler):
-        def do_GET(self):
-            if self.path == '/health' or self.path == '/':
-                self.send_response(200)
-                self.send_header('Content-type', 'text/plain')
-                self.end_headers()
-                # FIXED: No emoji in bytes string
-                self.wfile.write(b'Telegram Bot is running')
-            else:
-                self.send_response(404)
-                self.end_headers()
-        
-        def log_message(self, format, *args):
-            # Suppress default logging
-            pass
-    
-    # Create server that listens on all interfaces
-    try:
-        server = socketserver.TCPServer(("0.0.0.0", 8080), HealthHandler)
-        print("🌐 Health check server started on port 8080")
-        server.serve_forever()
-    except Exception as e:
-        print(f"❌ Health server error: {e}")
-
 async def main():
     """Main function that works on Koyeb (FREE 24/7)."""
     print("=" * 50)
@@ -662,10 +652,10 @@ async def main():
     print(f"⚡ Mode: Polling (0.5s interval)")
     print("=" * 50)
     
-    # Start health check server in background thread
-    health_thread = threading.Thread(target=run_health_check, daemon=True)
-    health_thread.start()
-    print("✅ Health check server running on port 8080")
+    # Start Flask server in background thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    print("✅ Flask health server started")
     
     # Initialize and start Telegram bot
     application = await setup_application()
@@ -692,7 +682,7 @@ async def main():
         await application.stop()
 
 if __name__ == '__main__':
-    print("🚀 Launching Telegram Bot with Health Check Server...")
+    print("🚀 Launching Telegram Bot with Flask Health Server...")
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
