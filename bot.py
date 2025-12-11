@@ -38,8 +38,8 @@ logger = logging.getLogger(__name__)
 
 # ========== TOKENS & CONFIG (CONTAINED IN SCRIPT) ==========
 # WARNING: Hardcoding tokens is not recommended for production!
-TELEGRAM_BOT_TOKEN = "7996081217:AAEHo4OKhxqXuc15l0DFMNoaj5oov9gGA5Y"
-GITHUB_TOKEN = "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"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO_OWNER = "WolfT31"
 GITHUB_REPO_NAME = "SPORTVIP"
 GITHUB_FILE_PATH = "Users.json"
