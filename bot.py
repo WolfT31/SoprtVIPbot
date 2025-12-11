@@ -1,0 +1,703 @@
+import os
+import json
+import requests
+import base64
+import time
+import random
+import string
+from datetime import datetime
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+import logging
+import asyncio
+import threading
+import http.server
+import socketserver
+
+# Configure logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# Get configuration from environment variables
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', "7996081217:AAEHo4OKhxqXuc15l0DFMNoaj5oov9gGA5Y")
+GITHUB_TOKEN = os.getenv('GITHUB_TOKEN', "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")
+GITHUB_REPO_OWNER = os.getenv('GITHUB_REPO_OWNER', "WolfT31")
+GITHUB_REPO_NAME = os.getenv('GITHUB_REPO_NAME', "SPORTVIP")
+GITHUB_FILE_PATH = "Users.json"
+DEFAULT_DATE = "2025-12-12"
+
+# Store user states for conversation flow
+user_states = {}
+
+# ========== YOUR ORIGINAL FUNCTIONS ==========
+def generate_random_password(length=4):
+    if length > 4:
+        length = 4
+    characters = string.ascii_letters + string.digits + string.punctuation
+    return ''.join(random.choice(characters) for _ in range(length))
+
+def generate_random_username():
+    prefix = "wolf_"
+    max_suffix_length = 8 - len(prefix)
+    if max_suffix_length <= 0:
+        return prefix[:8]
+    suffix = ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(max_suffix_length))
+    return prefix + suffix
+
+def load_users():
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3.raw"
+    }
+    url = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/contents/{GITHUB_FILE_PATH}"
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            data = json.loads(response.text)
+            if isinstance(data, list):
+                return data
+            elif isinstance(data, dict) and "users" in data:
+                return data["users"]
+        logger.error(f"Failed to load users (HTTP {response.status_code})")
+        return []
+    except Exception as e:
+        logger.error(f"Error loading users: {str(e)}")
+        return []
+
+def save_users(users):
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    try:
+        sha_url = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/contents/{GITHUB_FILE_PATH}"
+        response = requests.get(sha_url, headers=headers)
+        if response.status_code != 200:
+            logger.error(f"Failed to get file SHA: {response.text}")
+            return False
+
+        sha = response.json().get("sha", "")
+        update_url = sha_url
+        content = json.dumps(users, indent=2)
+        encoded_content = base64.b64encode(content.encode("utf-8")).decode("utf-8")
+
+        data = {
+            "message": "Update user list",
+            "content": encoded_content,
+            "sha": sha
+        }
+        response = requests.put(update_url, headers=headers, json=data)
+        if response.status_code == 200:
+            logger.info("Database updated successfully")
+            return True
+        logger.error(f"Failed to update GitHub: {response.text}")
+        return False
+    except Exception as e:
+        logger.error(f"Error saving users: {str(e)}")
+        return False
+
+def get_days_left(expire_str):
+    try:
+        expire_date = datetime.strptime(expire_str, "%Y-%m-%d").date()
+        return (expire_date - datetime.now().date()).days
+    except:
+        return -999
+
+# ========== YOUR ORIGINAL HANDLERS ==========
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send a welcome message when the command /start is issued."""
+    welcome_text = """
+🏆 *ADMIN PANEL SERVER BOT* 🏆
+
+*habari kiongozi mimi ni bot wa kukusaidia kusajiri na kumanage accounts zote za app ya aviator*
+
+*Available Commands:*
+/start - See if Bot is Online
+/add - Add new user
+/remove - Remove user
+/list - List all users
+/help - Show help information
+
+      𝚃𝚞𝚖𝚒𝚊 𝙱𝚞𝚝𝚝𝚘𝚗 𝚊𝚞 𝙲𝚘𝚖𝚖𝚊𝚗𝚍𝚜
+"""
+    
+    keyboard = [
+        [InlineKeyboardButton("➕ Add User", callback_data='add_user')],
+        [InlineKeyboardButton("🗑️ Remove User", callback_data='remove_user')],
+        [InlineKeyboardButton("📋 List Users", callback_data='list_users')],
+        [InlineKeyboardButton("ℹ️ Help", callback_data='help')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        welcome_text,
+        parse_mode='Markdown',
+        reply_markup=reply_markup
+    )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send help message."""
+    help_text = """
+*📖 HELP MENU*
+
+*How to use this bot:*
+
+1. *Add User*: Click 'Add User' button or type /add
+   - You'll be prompted for:
+     • Device ID
+     • Username
+     • Password
+     • Expiration Date (YYYY-MM-DD)
+     • Offline Access (yes/no)
+
+2. *Remove User*: Click 'Remove User' or type /remove
+   - Enter the username to remove
+   - If multiple users exist, you'll choose which one
+
+3. *List Users*: Click 'List Users' or type /list
+   - Shows all approved users with details
+
+*Note:* All data is stored in GitHub repository.
+"""
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle button callbacks."""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    if query.data == 'add_user':
+        user_states[user_id] = {'state': 'awaiting_device_id'}
+        await query.edit_message_text(
+            "Please enter the *Device ID*:",
+            parse_mode='Markdown'
+        )
+    
+    elif query.data == 'remove_user':
+        user_states[user_id] = {'state': 'awaiting_remove_username'}
+        await query.edit_message_text(
+            "Please enter the *Username* to remove:",
+            parse_mode='Markdown'
+        )
+    
+    elif query.data == 'list_users':
+        await list_users_command(update, context, query=query)
+    
+    elif query.data == 'help':
+        await help_command(update, context)
+        await query.edit_message_reply_markup(reply_markup=query.message.reply_markup)
+    
+    elif query.data == 'cancel':
+        user_states.pop(user_id, None)
+        await query.edit_message_text(
+            "Operation cancelled. Use /start to see menu again.",
+            parse_mode='Markdown'
+        )
+
+async def add_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start the add user process."""
+    user_id = update.effective_user.id
+    user_states[user_id] = {'state': 'awaiting_device_id'}
+    
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='cancel')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "Let's add a new user.\n\nPlease enter the *Device ID*:",
+        parse_mode='Markdown',
+        reply_markup=reply_markup
+    )
+
+async def remove_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start the remove user process."""
+    user_id = update.effective_user.id
+    user_states[user_id] = {'state': 'awaiting_remove_username'}
+    
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data='cancel')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "Please enter the *Username* to remove:",
+        parse_mode='Markdown',
+        reply_markup=reply_markup
+    )
+
+async def list_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE, query=None):
+    """List all users."""
+    users = load_users()
+    
+    if not users:
+        text = "📭 *No approved users yet.*"
+    else:
+        text = "📋 *APPROVED USERS*\n\n"
+        for i, user in enumerate(users, 1):
+            days_left = get_days_left(user['expiresAt'])
+            status = "✅" if days_left > 0 else "❌"
+            
+            text += f"*User #{i}*\n"
+            text += f"{status} *ID:* `{user['id']}`\n"
+            text += f"👤 *Username:* `{user['username']}`\n"
+            text += f"🔑 *Password:* `{user['password']}`\n"
+            text += f"📅 *Expires:* `{user['expiresAt']}` "
+            text += f"({days_left} days left)\n"
+            text += f"💾 *Offline Access:* `{user.get('allowOffline', False)}`\n"
+            text += "━" * 20 + "\n"
+    
+    keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data='menu')]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if query:
+        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+    else:
+        await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle user messages based on state."""
+    user_id = update.effective_user.id
+    message_text = update.message.text.strip()
+    
+    if user_id not in user_states:
+        keyboard = [
+            [InlineKeyboardButton("➕ Add User", callback_data='add_user')],
+            [InlineKeyboardButton("🗑️ Remove User", callback_data='remove_user')],
+            [InlineKeyboardButton("📋 List Users", callback_data='list_users')],
+            [InlineKeyboardButton("ℹ️ Help", callback_data='help')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "Please use the buttons or commands to interact with the bot.",
+            reply_markup=reply_markup
+        )
+        return
+    
+    state = user_states[user_id]['state']
+    
+    if state == 'awaiting_device_id':
+        user_states[user_id]['device_id'] = message_text
+        user_states[user_id]['state'] = 'awaiting_username'
+        await update.message.reply_text(
+            "Great! Now enter the *Username*:",
+            parse_mode='Markdown'
+        )
+    
+    elif state == 'awaiting_username':
+        user_states[user_id]['username'] = message_text
+        user_states[user_id]['state'] = 'awaiting_password'
+        await update.message.reply_text(
+            "Now enter the *Password*:",
+            parse_mode='Markdown'
+        )
+    
+    elif state == 'awaiting_password':
+        user_states[user_id]['password'] = message_text
+        user_states[user_id]['state'] = 'awaiting_expiration'
+        await update.message.reply_text(
+            f"⏳Enter *Expiration Date* ⏳ \n example: {DEFAULT_DATE}",
+            parse_mode='Markdown'
+        )
+    
+    elif state == 'awaiting_expiration':
+        expiresAt = message_text if message_text else DEFAULT_DATE
+        try:
+            datetime.strptime(expiresAt, "%Y-%m-%d")
+            user_states[user_id]['expiresAt'] = expiresAt
+            user_states[user_id]['state'] = 'awaiting_offline'
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Yes", callback_data='offline_yes'),
+                    InlineKeyboardButton("❌ No", callback_data='offline_no')
+                ],
+                [InlineKeyboardButton("❌ Cancel", callback_data='cancel')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                "Allow *Offline Access*?",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Invalid date format. Please use YYYY-MM-DD. Try again:"
+            )
+    
+    elif state == 'awaiting_remove_username':
+        username = message_text
+        users = load_users()
+        
+        if not users:
+            await update.message.reply_text("❌ No users found in database.")
+            user_states.pop(user_id, None)
+            return
+        
+        matching_users = [user for user in users if user["username"] == username]
+        
+        if not matching_users:
+            await update.message.reply_text(f"❌ User with username '{username}' not found.")
+            user_states.pop(user_id, None)
+            return
+        
+        if len(matching_users) > 1:
+            text = f"Found *{len(matching_users)}* users with username '{username}':\n\n"
+            for i, user in enumerate(matching_users, 1):
+                text += f"*Option {i}:*\n"
+                text += f"Device ID: `{user['id']}`\n"
+                text += f"Username: `{user['username']}`\n"
+                text += f"Expiration: `{user['expiresAt']}`\n\n"
+            
+            text += "Enter the number to remove, or type 'all' to remove all:"
+            
+            user_states[user_id]['remove_username'] = username
+            user_states[user_id]['matching_users'] = matching_users
+            user_states[user_id]['state'] = 'awaiting_remove_choice'
+            
+            await update.message.reply_text(text, parse_mode='Markdown')
+        else:
+            user = matching_users[0]
+            user_states[user_id]['remove_user'] = user
+            user_states[user_id]['state'] = 'confirm_remove_single'
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Yes, Remove", callback_data='confirm_remove'),
+                    InlineKeyboardButton("❌ Cancel", callback_data='cancel')
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            text = f"Found user:\n\n"
+            text += f"ID: `{user['id']}`\n"
+            text += f"Username: `{user['username']}`\n"
+            text += f"Expiration: `{user['expiresAt']}`\n\n"
+            text += "Are you sure you want to remove this user?"
+            
+            await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+    
+    elif state == 'awaiting_remove_choice':
+        choice = message_text.lower()
+        
+        if choice == 'all':
+            user_states[user_id]['state'] = 'confirm_remove_all'
+            
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Yes, Remove All", callback_data='confirm_remove_all'),
+                    InlineKeyboardButton("❌ Cancel", callback_data='cancel')
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                f"⚠️ Are you sure you want to remove ALL users with username '{user_states[user_id]['remove_username']}'?",
+                reply_markup=reply_markup
+            )
+        elif choice.isdigit():
+            idx = int(choice) - 1
+            matching_users = user_states[user_id]['matching_users']
+            
+            if 0 <= idx < len(matching_users):
+                user_states[user_id]['remove_user'] = matching_users[idx]
+                user_states[user_id]['state'] = 'confirm_remove_single'
+                
+                keyboard = [
+                    [
+                        InlineKeyboardButton("✅ Yes, Remove", callback_data='confirm_remove'),
+                        InlineKeyboardButton("❌ Cancel", callback_data='cancel')
+                    ]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                user = matching_users[idx]
+                text = f"Selected user:\n\n"
+                text += f"ID: `{user['id']}`\n"
+                text += f"Username: `{user['username']}`\n"
+                text += f"Expiration: `{user['expiresAt']}`\n\n"
+                text += "Are you sure you want to remove this user?"
+                
+                await update.message.reply_text(text, parse_mode='Markdown', reply_markup=reply_markup)
+            else:
+                await update.message.reply_text("❌ Invalid choice. Please try again.")
+        else:
+            await update.message.reply_text("❌ Invalid input. Please enter a number or 'all'.")
+
+async def handle_offline_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle offline access choice."""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    if user_id not in user_states or user_states[user_id].get('state') != 'awaiting_offline':
+        return
+    
+    if query.data == 'offline_yes':
+        allowOffline = True
+    elif query.data == 'offline_no':
+        allowOffline = False
+    else:
+        return
+    
+    user_data = user_states[user_id]
+    
+    try:
+        users = load_users()
+        
+        if any(user["username"] == user_data['username'] and user["password"] == user_data['password'] for user in users):
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Yes, Add Anyway", callback_data='add_anyway'),
+                    InlineKeyboardButton("❌ Cancel", callback_data='cancel')
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            user_states[user_id]['allowOffline'] = allowOffline
+            user_states[user_id]['state'] = 'confirm_duplicate'
+            
+            await query.edit_message_text(
+                "⚠️ This username/password combination already exists.\n\nDo you want to add it anyway?",
+                reply_markup=reply_markup
+            )
+            return
+        
+        users.append({
+            "id": user_data['device_id'],
+            "username": user_data['username'],
+            "password": user_data['password'],
+            "expiresAt": user_data['expiresAt'],
+            "allowOffline": allowOffline
+        })
+        
+        if save_users(users):
+            success_text = f"""
+🔥 *ACCOUNT CREATION SUCCESS* 🔥
+
+🆔 *User ID:* `{user_data['device_id']}`
+👤 *Username:* `{user_data['username']}`
+🔑 *Password:* `{user_data['password']}`
+📅 *Expires:* `{user_data['expiresAt']}`
+💾 *Offline Access:* `{allowOffline}`
+
+💠 *Coded by WOLF* *Monster Team*
+"""
+            
+            keyboard = [[InlineKeyboardButton("🏠 Back to Menu", callback_data='menu')]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.edit_message_text(success_text, parse_mode='Markdown', reply_markup=reply_markup)
+            user_states.pop(user_id, None)
+        else:
+            await query.edit_message_text("❌ Failed to save user to database.")
+            user_states.pop(user_id, None)
+            
+    except Exception as e:
+        logger.error(f"Error adding user: {str(e)}")
+        await query.edit_message_text(f"❌ Error: {str(e)}")
+        user_states.pop(user_id, None)
+
+async def handle_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle confirmation callbacks."""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    if query.data == 'confirm_remove':
+        if user_id in user_states and user_states[user_id].get('state') == 'confirm_remove_single':
+            user_to_remove = user_states[user_id]['remove_user']
+            users = load_users()
+            users = [user for user in users if user != user_to_remove]
+            
+            if save_users(users):
+                await query.edit_message_text("✅ User successfully removed!")
+            else:
+                await query.edit_message_text("❌ Failed to remove user from database.")
+            
+            user_states.pop(user_id, None)
+    
+    elif query.data == 'confirm_remove_all':
+        if user_id in user_states and user_states[user_id].get('state') == 'confirm_remove_all':
+            username = user_states[user_id]['remove_username']
+            users = load_users()
+            users = [user for user in users if user["username"] != username]
+            
+            if save_users(users):
+                await query.edit_message_text(f"✅ All users with username '{username}' successfully removed!")
+            else:
+                await query.edit_message_text("❌ Failed to remove users from database.")
+            
+            user_states.pop(user_id, None)
+    
+    elif query.data == 'add_anyway':
+        if user_id in user_states and user_states[user_id].get('state') == 'confirm_duplicate':
+            user_data = user_states[user_id]
+            
+            users = load_users()
+            users.append({
+                "id": user_data['device_id'],
+                "username": user_data['username'],
+                "password": user_data['password'],
+                "expiresAt": user_data['expiresAt'],
+                "allowOffline": user_data['allowOffline']
+            })
+            
+            if save_users(users):
+                success_text = f"""
+✅ *ACCOUNT CREATED SUCCESSFULLY*
+
+🆔 *User ID:* `{user_data['device_id']}`
+👤 *Username:* `{user_data['username']}`
+🔑 *Password:* `{user_data['password']}`
+📅 *Expires:* `{user_data['expiresAt']}`
+💾 *Offline Access:* `{user_data['allowOffline']}`
+
+💠 *Coded by WOLF*
+"""
+                keyboard = [[InlineKeyboardButton("🏠 Back to Menu", callback_data='menu')]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await query.edit_message_text(success_text, parse_mode='Markdown', reply_markup=reply_markup)
+            else:
+                await query.edit_message_text("❌ Failed to save user to database.")
+            
+            user_states.pop(user_id, None)
+    
+    elif query.data == 'menu':
+        welcome_text = """
+🏆 *ADMIN PANEL SERVER BOT* 🏆
+
+Karibu kwenye Database Management Bot!
+
+*Available Commands:*
+/start - Show this welcome message
+/add - Add new user
+/remove - Remove user
+/list - List all users
+/help - Show help information
+"""
+        
+        keyboard = [
+            [InlineKeyboardButton("➕ Add User", callback_data='add_user')],
+            [InlineKeyboardButton("🗑️ Remove User", callback_data='remove_user')],
+            [InlineKeyboardButton("📋 List Users", callback_data='list_users')],
+            [InlineKeyboardButton("ℹ️ Help", callback_data='help')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(welcome_text, parse_mode='Markdown', reply_markup=reply_markup)
+        if user_id in user_states:
+            user_states.pop(user_id, None)
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Log errors."""
+    logger.error(f"Update {update} caused error {context.error}")
+
+async def setup_application():
+    """Create and configure the bot application."""
+    
+    application = Application.builder() \
+    .token(TELEGRAM_BOT_TOKEN) \
+    .read_timeout(15.0) \
+    .connect_timeout(15.0) \
+    .pool_timeout(10.0) \
+    .build()
+    
+    # Register all handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("add", add_user_command))
+    application.add_handler(CommandHandler("remove", remove_user_command))
+    application.add_handler(CommandHandler("list", list_users_command))
+    
+    application.add_handler(CallbackQueryHandler(button_handler, pattern='^(add_user|remove_user|list_users|help|cancel)$'))
+    application.add_handler(CallbackQueryHandler(handle_offline_callback, pattern='^(offline_yes|offline_no)$'))
+    application.add_handler(CallbackQueryHandler(handle_confirm_callback, pattern='^(confirm_remove|confirm_remove_all|add_anyway|menu)$'))
+    
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_error_handler(error_handler)
+    
+    return application
+
+# ========== FIXED HEALTH CHECK SERVER FOR KOYEB ==========
+def run_health_check():
+    """Simple HTTP server for Koyeb health checks on port 8080"""
+    class HealthHandler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == '/health' or self.path == '/':
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                # FIXED: No emoji in bytes string
+                self.wfile.write(b'Telegram Bot is running')
+            else:
+                self.send_response(404)
+                self.end_headers()
+        
+        def log_message(self, format, *args):
+            # Suppress default logging
+            pass
+    
+    # Create server that listens on all interfaces
+    try:
+        server = socketserver.TCPServer(("0.0.0.0", 8080), HealthHandler)
+        print("🌐 Health check server started on port 8080")
+        server.serve_forever()
+    except Exception as e:
+        print(f"❌ Health server error: {e}")
+
+async def main():
+    """Main function that works on Koyeb (FREE 24/7)."""
+    print("=" * 50)
+    print("🤖 STARTING BOT ON KOYEB (FREE 24/7 HOSTING)")
+    print("=" * 50)
+    print(f"🔗 Bot token: {TELEGRAM_BOT_TOKEN[:10]}...")
+    print(f"🌐 GitHub Repo: {GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}")
+    print(f"⚡ Mode: Polling (0.5s interval)")
+    print("=" * 50)
+    
+    # Start health check server in background thread
+    health_thread = threading.Thread(target=run_health_check, daemon=True)
+    health_thread.start()
+    print("✅ Health check server running on port 8080")
+    
+    # Initialize and start Telegram bot
+    application = await setup_application()
+    await application.initialize()
+    
+    print("📡 Starting bot with polling...")
+    await application.start()
+    await application.updater.start_polling(
+        poll_interval=0.5,      # Check every 0.5 seconds
+        timeout=10,             # 10 second timeout per request
+        drop_pending_updates=True,  # Skip old messages
+        allowed_updates=Update.ALL_TYPES
+    )
+    
+    print("✅ Telegram Bot is now running 24/7 on Koyeb!")
+    print("=" * 50)
+    
+    # Keep bot running forever
+    try:
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        print("\n🛑 Bot shutdown requested")
+    finally:
+        await application.stop()
+
+if __name__ == '__main__':
+    print("🚀 Launching Telegram Bot with Health Check Server...")
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n🛑 Bot stopped by user (Ctrl+C)")
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
