@@ -827,26 +827,25 @@ async def setup_application():
     
     return application
 
-# ========== MAIN FUNCTION ==========
+# ========== MAIN FUNCTION (WEBHOOK MODE FOR KOYEB) ==========
 async def main():
-    """Main function that works on Koyeb (FREE 24/7)."""
     print("=" * 50)
-    print("🤖 STARTING BOT ON KOYEB (FREE 24/7 HOSTING)")
+    print("🤖 STARTING BOT ON KOYEB USING WEBHOOKS")
     print("=" * 50)
     print(f"🔗 Bot token: {TELEGRAM_BOT_TOKEN[:10]}...")
     print(f"🌐 GitHub Repo: {GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}")
     print(f"📁 Data file: {GITHUB_FILE_PATH}")
-    print("⚡ Mode: Polling")
+    print("⚡ Mode: Webhook")
     print("=" * 50)
-    
-    # Test GitHub connection first
+
+    # Test GitHub connection
     print("🔍 Testing GitHub connection...")
     headers = {
         "Authorization": f"token {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json"
     }
     url = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/contents/{GITHUB_FILE_PATH}"
-    
+
     try:
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
@@ -858,54 +857,44 @@ async def main():
             print(f"Error: {response.text[:200]}")
     except Exception as e:
         print(f"❌ GitHub connection error: {str(e)}")
-    
-    # Start Flask server in background thread
+
+    # Start Flask health server in background
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     print("✅ Flask health server started")
-    
-    # Initialize and start Telegram bot
-    try:
-        application = await setup_application()
-        
-        print("📡 Starting bot with polling...")
-        await application.initialize()
-        await application.start()
-        
-        # Start polling
-        await application.updater.start_polling(
-            poll_interval=1.0,      # Check every 1 second
-            timeout=30,             # 30 second timeout per request
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES
-        )
-        
-        print("✅ Telegram Bot is now running 24/7 on Koyeb!")
-        print("💡 Use /debug command to check bot status")
-        print("=" * 50)
-        
-        # Keep bot running forever
-        while True:
-            await asyncio.sleep(3600)  # Sleep for 1 hour
-            
-    except Exception as e:
-        print(f"❌ Failed to start bot: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        if 'application' in locals():
-            await application.stop()
-            print("🛑 Bot stopped")
+
+    # Build bot application
+    application = await setup_application()
+
+    # Webhook URL
+    KOYEB_APP = os.getenv("KOYEB_APP_NAME")  # You MUST add this in Koyeb Secrets
+    if not KOYEB_APP:
+        raise Exception("❌ Missing KOYEB_APP_NAME in Koyeb Secrets!")
+
+    webhook_url = f"https://{KOYEB_APP}.koyeb.app/{TELEGRAM_BOT_TOKEN}"
+    port = int(os.getenv("PORT", 8080))
+
+    print(f"🌐 Setting webhook: {webhook_url}")
+
+    # Set webhook
+    await application.bot.set_webhook(webhook_url)
+
+    print("📡 Webhook set successfully! Starting webhook listener...")
+
+    # Start webhook listener
+    await application.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=TELEGRAM_BOT_TOKEN,
+        webhook_url=webhook_url
+    )
+
 
 # ========== ENTRY POINT ==========
-if __name__ == '__main__':
-    print("🚀 Launching Telegram Bot with Flask Health Server...")
-    
+if __name__ == "__main__":
+    print("🚀 Launching Telegram bot with Webhook mode on Koyeb")
     try:
-        # Run the bot
         asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n🛑 Bot stopped by user (Ctrl+C)")
     except Exception as e:
         print(f"❌ Unexpected error: {e}")
         import traceback
